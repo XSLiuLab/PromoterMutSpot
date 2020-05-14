@@ -155,7 +155,7 @@ saveToBed <- function(dt, path = tempfile(fileext = ".bed"), modifyStart = TRUE,
   }
   
   data.table::fwrite(x = dt, file = path, sep = "\t", col.names = FALSE)
-  if (isTrue(sort)) {
+  if (isTRUE(sort)) {
     message("Sorting ", path)
     temp_file = tempfile(fileext = ".bed")
     sortBed(path, temp_file)
@@ -169,8 +169,119 @@ saveToBed <- function(dt, path = tempfile(fileext = ".bed"), modifyStart = TRUE,
 # Assert ------------------------------------------------------------------
 
 assert_command_exists = function(cmd) {
-  if (length(Sys.which(cmd)) < 1) {
+  if (nchar(Sys.which(cmd)[1]) < 1) {
     stop(paste0("'", cmd, "'"), 
          "command not found. Are you in unix environment? If you are, check your PATH.")
   }
+}
+
+
+# Annotate ----------------------------------------------------------------
+
+getMutContext <- function(mutationList, window_size = 3L,
+                          ref_genome = "BSgenome.Hsapiens.UCSC.hg19") {
+  
+  ref_genome = BSgenome::getBSgenome(genome = ref_genome)
+  extract_dt = unique(mutationList[, .(chr, start, end)])
+  
+  size = round((window_size - 1L) / 2)
+  extract_dt[, context := BSgenome::getSeq(
+    ref_genome,
+    names = chr,
+    start = start - size,
+    end = end + size,
+    as.character = TRUE
+  )]
+  
+  extract_dt[, region_ID := paste(chr, start, end, sep = ":")]
+  extract_dt = extract_dt[, data.table::data.table(
+      chr = chr,
+      start = seq(start - size, end - size),
+      end = seq(start + size, end + size),
+      context = substring(context, 
+                          seq(1L, nchar(context) - window_size + 1L),
+                          seq(window_size, nchar(context)))
+    ), by = region_ID]
+  extract_dt[, pos := (start + end) / 2L]
+  
+  return(extract_dt)
+}
+
+pos_anno <- function(pos_file, anno_file, result_file) {
+  assert_command_exists("bedtools")
+  assert_command_exists("sort")
+  
+  temp2 <- paste("sorted_", basename(anno_file), sep = "")
+  cmd2 <- paste("sort -k 1,1 -k 2,2n ",anno_file," > ",temp2, sep = "")
+  system(cmd2)
+  cmd3 <- paste("bedtools map -a ",pos_file," -b ",temp2," -c 4 -o mean > ",result_file, sep = "")
+  system(cmd3)
+  file.remove(temp2)
+}
+
+annotate_position = function(pos_dt, bed_dt, header = FALSE, modifyBedStart = TRUE) {
+  if (is.data.frame(bed_dt)) {
+    bed_dt <- data.table::as.data.table(bed_dt)
+  } else {
+    bed_dt <- data.table::fread(bed_dt, header = header)
+  }
+  colnames(bed_dt)[1:3] = c("chr", "start", "end")
+  if (modifyBedStart) {
+    bed_dt[, start := start + 1]
+  }
+  
+  data.table::setkey(bed_dt, chr, start, end)
+  out_dt = data.table::foverlaps(pos_dt, bed_dt, type = "any")[!is.na(start)]
+  return(out_dt)
+}
+
+annotate_closet_distance = function(pos_dt, bed_dt, out_path = NULL,
+                                    pos_path = tempfile(fileext = ".bed"),
+                                    bed_path = tempfile(fileext = ".bed"),
+                                    modifyStart = TRUE, sort = TRUE) {
+  assert_command_exists("bedtools")
+  
+  message("Saving bed_dt")
+  if (is.data.frame(bed_dt)) {
+    message(" to ", bed_path)
+    saveToBed(dt = bed_dt, path = bed_path, modifyStart = modifyStart, sort = sort)
+  } else {
+    if (sort) {
+      sortBed(bed_dt, bed_path)
+    }
+  }
+  
+  message("Saving pos_dt")
+  pos_dt[[2]] = as.integer(pos_dt[[2]])
+  pos_dt[[3]] = as.integer(pos_dt[[3]])
+  message("  to ", pos_path)
+  saveToBed(dt = pos_dt, path = pos_path, modifyStart = modifyStart, sort = sort)
+
+  if (is.null(out_path)) {
+    out_path2 = tempfile(fileext = ".bed")
+  } else {
+    out_path2 = out_path
+  }
+  
+  message("Calling bedtools closet")
+  
+  system(paste(
+    "bedtools closest -a ",
+    pos_path,
+    "-b",
+    bed_path,
+    "-d >",
+    out_path2
+  ))
+  
+  if (is.null(out_path)) {
+    out_dt = data.table::fread(out_path2, header = FALSE)
+    colnames(out_dt)[1:7] = c("chr", "start", "end", "chr_closet", "start_closet", "end_closet", "distance")
+    message("Return a data.table")
+    file.remove(pos_path, bed_path, out_path2)
+    return(out_dt)
+  }
+  
+  message("The result file has been saved to ", out_path)
+  file.remove(pos_path, bed_path)
 }
