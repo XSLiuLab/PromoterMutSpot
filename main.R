@@ -121,10 +121,117 @@ for (bed_dir in bed_dirs) {
 
 save(epigenetic_list, file = "data/epigenetic_list.RData")
 
-## Step5: construct patient-specific background mutation probability model (based on logistic)
+## Clean annotations
+## generate model matrix
+load("data/genetic_raw_features.RData")
+load("data/epigenetic_list.RData")
 
-## Step6: calculate the region mutation probability for each patient
 
-## Step7: compute mutation statistical significance with Poisson binomial model
+genetic.conservation = data.table::fread(
+  "data/Conservation_in_positions.bed",
+  header = FALSE
+)
+colnames(genetic.conservation) = c("chr", "start", "end", "pos", "conservation")
 
-## Step8: report final region list
+## Keep key values
+mut_df = genetic.mut_context[, .(region_ID, chr, pos)]
+colnames(mut_df)[3] = "position"
+mut_df$pos = paste0("Pos", 1:nrow(mut_df))
+save(mut_df, file = "data/all_positions.RData")
+
+genetic.mut_context$pos = mut_df$pos
+genetic.mut_context = genetic.mut_context[, .(pos, context)]
+genetic.rep_time[, pos := mut_df$pos]
+genetic.rep_time = genetic.rep_time[, .(pos, rep_val)]
+colnames(genetic.rep_time)[2] = "reptime"
+
+all(genetic.tfbs_distance$distance >= 0)
+genetic.tfbs_distance[, tfbs := ifelse(
+  distance > 100, 100, distance
+)]
+genetic.tfbs_distance = merge(mut_df, unique(genetic.tfbs_distance[, .(chr, end, tfbs)]),
+      by.x = c("chr", "position"), by.y = c("chr", "end"), 
+      all.x = TRUE)[, .(pos, tfbs)]
+
+genetic.conservation = genetic.conservation[, .(pos, conservation)]
+genetic.cpg = genetic.cpg[, .(index)]
+genetic.cpg[, cpg := 1]
+colnames(genetic.cpg)[1] = "pos"
+genetic.gc_content = genetic.gc_content[, .(index, V5)]
+colnames(genetic.gc_content) = c("pos", "gc")
+
+genetic.conservation
+genetic.cpg
+genetic.gc_content
+genetic.mut_context
+genetic.rep_time
+genetic.tfbs_distance
+
+all_genetics = purrr::reduce(
+  list(genetic.conservation,
+       genetic.cpg,
+       genetic.gc_content,
+       genetic.mut_context,
+       genetic.rep_time,
+       genetic.tfbs_distance),
+  dplyr::full_join,
+  by = "pos",
+  all.x = TRUE
+)
+data.table::setDT(all_genetics)
+all_genetics[, cpg := ifelse(is.na(cpg), 0L, 1L)]
+
+save(all_genetics, file = "data/all_genetics.RData")
+
+all_epigenetics = purrr::map(epigenetic_list, function(t) {
+  t = purrr::map2(t, names(t), function(x, y) {
+    y = sub(pattern = ".*-([^\\.]+)\\..*", "\\1", y)
+    colnames(x)[4] = y
+    x[, c("index", y), with = FALSE]
+  })
+  
+  df = purrr::reduce(t, dplyr::full_join, by = "index", all.x = TRUE)
+  dplyr::mutate_if(df, ~any(is.na(.)), ~ifelse(is.na(.), 0, .))
+})
+
+# averge two melanoma
+colnames(all_epigenetics$E059_Melanoma)
+colnames(all_epigenetics$E061_Melanoma)
+
+all_epigenetics = lapply(
+  all_epigenetics,
+  data.table::as.data.table
+)
+
+all_epigenetics$Melanoma = merge(
+  all_epigenetics$E059_Melanoma,
+  all_epigenetics$E061_Melanoma,
+  by = "index"
+)
+
+all_epigenetics$Melanoma = data.table::as.data.table(
+  dplyr::mutate_if(all_epigenetics$Melanoma,
+                   ~any(is.na(.)),
+                   ~ifelse(is.na(.), 0, .))
+)
+
+all_epigenetics$Melanoma = all_epigenetics$Melanoma[
+  , `:=`(
+    DNase = (DNase.x + DNase.y) / 2,
+    H3K27ac = (H3K27ac.x + H3K27ac.y) / 2,
+    H3K27me3 = (H3K27me3.x + H3K27me3.y) / 2,
+    H3K36me3 = (H3K36me3.x + H3K36me3.y) / 2,
+    H3K4me1 = (H3K4me1.x + H3K4me1.y) / 2,
+    H3K4me3 = (H3K4me3.x + H3K4me3.y) / 2,
+    H3K9me3 = (H3K9me3.x + H3K9me3.y) / 2
+  )
+][, .(index, DNase, H3K27ac, H3K27me3, H3K36me3, H3K4me1, H3K4me3, H3K9me3)]
+all_epigenetics$E059_Melanoma = NULL
+all_epigenetics$E061_Melanoma = NULL
+
+sapply(all_epigenetics, ncol)
+sapply(all_epigenetics, class)
+
+save(all_epigenetics, file = "data/all_epigenetics.RData")
+
+rm(list = ls())
