@@ -76,6 +76,7 @@ model_data = data.table::rbindlist(model_data_list, fill = TRUE, idcol = "cancer
 save(model_data, file = "data/model_data.RData")
 
 length(unique(model_data$patient))
+## 2820
 
 # We used
 sum(sapply(type_list, length))
@@ -86,10 +87,4 @@ length(unique(z$project_code))
 nrow(z[project_code %in% Reduce(c, type_list)])
 # 2897
 
-## Step5: construct patient-specific background mutation probability model (based on logistic)
 
-## Step6: calculate the region mutation probability for each patient
-
-## Step7: compute mutation statistical significance with Poisson binomial model
-
-## Step8: report final region list

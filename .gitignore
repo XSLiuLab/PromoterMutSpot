@@ -1,3 +1,7 @@
 .Rproj.user/
 data/annotations
 sorted_hg19.100way.phastCons.bw
+data_fit.RData
+glm_fit.RData
+sip_fit.RData
+speedglm_fit.RData
