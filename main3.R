@@ -1,99 +1,104 @@
 library(dplyr)
 load("data/model_data.RData")
-data.table::setDT(model_data)
-model_data$gc = as.numeric(model_data$gc)
+#data.table::setDT(model_data)
 
-cancer_types = c(
-  "blood", "breast", "esophagus", "kidney",
-  "liver", "lung", "ovary", "pancreas", "melanoma"
-)
+# cancer_types = c(
+#   "blood", "breast", "esophagus", "kidney",
+#   "liver", "lung", "ovary", "pancreas", "melanoma"
+# )
 
 ## Step5: construct patient-specific background mutation probability model (based on logistic)
 
-data_mut = model_data[y == 1]
-data_mut[, y := NULL]
-data_mut = dplyr::mutate_if(data_mut,
-                 ~any(is.na(.)),
-                 ~ifelse(is.na(.), 0, .))
+fit = glm(freq ~ ., family=quasibinomial(link = "logit"), 
+          data = model_data[, -c(2:7, 21)], 
+          weights = model_data$n_patient,
+          trace = TRUE)
+save(fit, file = "data/fit.RData")
 
-data_non_mut = model_data[y != 1]
-data_non_mut[, y := NULL]
-data_non_mut = dplyr::mutate_if(data_non_mut,
-                            ~any(is.na(.)),
-                            ~ifelse(is.na(.), 0, .))
+#prob = predict(fit, newdata = model_data[1:5], type = "response")
+model_data[, prob := as.numeric(predict(fit, type = "response"))]
 
-set.seed(123456L)
-data_sample = data_non_mut %>% 
-  group_by(patient) %>% 
-  sample_n(2, replace = FALSE) %>% 
-  ungroup()
+save(model_data, file = "data/model_data.RData")
 
-data_fit = dplyr::bind_rows(data_mut %>% mutate(y = 1),
-                            data_sample %>% mutate(y = 0)) %>% 
-  select(-c("pos", "chr", "position"))
-
-save(data_fit, file = "data/data_fit.RData")
-
-# fit <- speedglm::speedglm(y ~., family = binomial(link = "logit"), data = data_fit,
-#                           set.default = list(row.chunk = 1000L), trace = TRUE, maxit = 13)
+# library(MASS)
+# sip_fit = stepAIC(fit)
+# save(sip_fit, file = "data/sip_fit.RData")
 # 
-# save(fit, file = "data/speedglm_fit.RData")
+# prob = predict(sip_fit, newdata = model_data[, -c(2:7)], type = "response")
 
-fit = glm(y ~ ., family=binomial(link = "logit"), data = data_fit[, -2], trace = TRUE)
-# save(fit, file = "data/glm_fit.RData")
+## Step6: calculate the region mutation probability
 
-load("data/glm_fit.RData")
+cal_region_p = function(p) {
+  1 - cumprod(1 - p)[length(p)]
+}
 
-newdata = model_data %>% 
-  dplyr::mutate_if(~any(is.na(.)),
-                   ~ifelse(is.na(.), 0, .))
+region_dt = model_data[, .(prob = cal_region_p(prob),
+                           total = sum(N),
+                           n_patient = unique(n_patient)), by = .(cancer, region_ID)]
 
-data = unique(data.table::as.data.table(newdata[, -5]))
-data$y = data$y / length(unique(model_data$patient))
-
-test_fit = glm(y ~ cpg + reptime + tfbs, family=binomial(link = "logit"), data = data, trace = TRUE)
-
-### The computation is intensive
-### Cannot work
-# #lobstr::obj_size(fit)
-# prob = vector("numeric", length = nrow(newdata))
-# for (i in 1:nrow(newdata)) {
-#   message("Predicting row #", i)
-#   prob[i] = predict(fit, newdata = newdata[i, -c(2:4, 18)], type = "response") 
-# }
-# 
-# future::plan("multiprocess", workers = 10)
-# options(future.globals.maxSize = Inf)
-# prob = furrr::future_map_dbl(1:nrow(newdata), function(i) {
-#   predict(fit, newdata = newdata[i, -c(2:4, 18)], type = "response") 
-# })
-
-library(MASS)
-sip_fit = stepAIC(fit)
-save(sip_fit, file = "data/sip_fit.RData")
-
-prob = predict(sip_fit, newdata = newdata[, -c(2:4, 18)], type = "response")
-
-
-# # Cancer-type specific
-# fit_list = list()
-# for (i in seq_along(cancer_types)) {
-#   message("Processing ", cancer_types[i])
-#   temp = model_data[cancer == cancer_types[i], -c("cancer", "pos", "chr", "position")]
-#   # Remove columns with NA
-#   NA_index = sapply(temp, function(x) any(is.na(x)))
-#   temp = temp[, !NA_index, with = FALSE] 
-#   # temp = temp %>%
-#   #   mutate_if(is.character, as.factor)
-#   fit <- speedglm::speedglm(y ~., family = binomial(link = "logit"), data = temp, 
-#                             set.default = list(row.chunk = 1000L), trace = TRUE, maxit = 2)
-#   fit_list[[cancer_types[i]]] = fit
-#   gc()
-# }
-
-
-## Step6: calculate the region mutation probability for each patient
+# region_dt = region_dt[total != 0]
 
 ## Step7: compute mutation statistical significance with Poisson binomial model
 
+region_list = unique(region_dt$region_ID)
+names(region_list) = region_list
+
+future::plan("multiprocess")
+region_p = furrr::future_map_dfr(region_list, function(x) {
+  message("Processing ", x)
+  dt = region_dt[region_dt$region_ID == x, ]
+  probs = rep(dt$prob, dt$n_patient)
+  n = sum(dt$total)
+  message("> n: ", n)
+  p = 1 - poibin::ppoibin(n - 1, probs)
+  message("> p: ", p)
+  message("====")
+  dplyr::tibble(
+    n = n,
+    p = p
+  )
+}, .id = "region_ID", .progress = TRUE)
+
+prob_region = dplyr::arrange(region_p, p) %>% 
+  data.table::as.data.table()
+colnames(prob_region)[3] = "p_val"
+# prob_region[, adj_p_val := p.adjust(p_val, method = "fdr")]
+
 ## Step8: report final region list
+
+load(file = "data/gene_df.RData")
+
+gene_df[, chr := paste0("chr", chr)]
+gene_df[, gene_start := start]
+gene_df[, gene_end := end]
+gene_df[, `:=`(
+  start = ifelse(strand == "+", gene_start - 5000, gene_end + 1), 
+  end   = ifelse(strand == "+", gene_start - 1, gene_end + 5000)
+)]
+
+data.table::setkey(gene_df, chr, start, end)
+
+prob_region = tidyr::separate(prob_region, col = "region_ID", into = c("chr", "start", "end"))
+prob_region = data.table::as.data.table(prob_region)
+prob_region$start = as.integer(prob_region$start)
+prob_region$end = as.integer(prob_region$end)
+
+prob_region_final <- data.table::foverlaps(
+  prob_region,
+  gene_df,
+  type = "any"
+)
+
+prob_region_final = prob_region_final[!is.na(gene_name)][
+  , .(gene_name, chr, i.start, i.end, p_val, n)]
+prob_region_final = prob_region_final[order(n, decreasing = TRUE)][gene_name != "BCL2"][n > 3]
+colnames(prob_region_final)[3:4] = c("start", "end")
+
+save(prob_region_final, file = "data/RegionMutationList.RData")
+load(file = "data/RegionMutationList.RData")
+
+prob_region_final[, pos := paste0(chr, ":", start, "-", end)]
+
+openxlsx::write.xlsx(prob_region_final[, list(pos, gene_name, n, p_val)], file = "data/RegionMutationList.xlsx")
+
+

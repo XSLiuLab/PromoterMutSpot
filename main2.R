@@ -36,14 +36,19 @@ model_data_list = lapply(seq_along(type_list), function(i) {
   message("Processing ", paste0(type, collapse = " "), " for ", cancer)
   
   type_ids = icgc_ids[project_code %in% type]
+  n_patient = nrow(type_ids)
   
-  message("> Constructing all region postion data.frame for all patient")
-  patient_dt = mut_df[, .(chr, position, pos)][rep(seq(nrow(mut_df)), each = nrow(type_ids)),]
-  patient_dt[, patient := rep(type_ids$icgc_donor_id, nrow(mut_df))]
-  # chr  position     pos  patient
-  # 1: chr1   6845287    Pos1  DO51591
-  # 2: chr1   6845287    Pos1  DO51583
-  # 3: chr1   6845287    Pos1  DO51585
+  mut_cancer = mutationList[patient %in% type_ids$icgc_donor_id]
+  mut_cancer = mut_cancer[, .(chr, i.end, patient)][, .(
+    N = .N,
+    patients = paste(unique(patient), collapse = ",")
+  ), by = .(chr, i.end)]
+  colnames(mut_cancer)[2] = "position"
+  
+  mut_df[, position := as.integer(position)]
+  patient_dt = merge(mut_df, mut_cancer, by = c("chr", "position"), all.x = TRUE)
+  patient_dt[, freq := ifelse(is.na(N), 0L, N / n_patient)]
+  
   ## Add genetics
   message("> Adding genetic annotations")
   patient_dt = merge(patient_dt, all_genetics, by = c("pos"), all.x = TRUE)
@@ -52,39 +57,26 @@ model_data_list = lapply(seq_along(type_list), function(i) {
   message("> Adding epigenetic annotations")
   patient_dt = merge(patient_dt, all_epigenetics[[cancer]], by.x = "pos", by.y = "index",
                      all.x = TRUE)
+  patient_dt[, gc := as.numeric(gc)]
   
   ## Set all 0 to positions and 0 to all NA features
   message("> Filling 0 to NA values")
   patient_dt = dplyr::mutate_if(patient_dt,
-                   ~any(is.na(.)),
-                   ~ifelse(is.na(.), 0, .)) %>% 
-    dplyr::mutate(y = 0) %>% 
+                   ~any(is.na(.) & is.numeric(.)),
+                   ~ifelse(is.na(.), 0, .)) %>%
     data.table::as.data.table()
   
-  ## And reassign 1 to actual mutation location in patients
-  temp = mutationList[patient %in% unique(patient_dt$patient)]
-  message("> Updating ", nrow(temp), " mutations")
-  for (i in 1:nrow(temp)) {
-    patient_dt[chr == temp[i]$chr & position == temp[i]$i.start & patient == temp[i]$patient,
-               y := 1] 
-  }
+  patient_dt$n_patient = n_patient
   patient_dt
 })
 names(model_data_list) = names(type_list)
 
 model_data = data.table::rbindlist(model_data_list, fill = TRUE, idcol = "cancer")
+
+model_data = model_data %>% 
+  dplyr::mutate_if(~any(is.na(.) & is.numeric(.)),
+                   ~ifelse(is.na(.), 0, .)) %>%
+  data.table::as.data.table()
+
 save(model_data, file = "data/model_data.RData")
-
-length(unique(model_data$patient))
-## 2820
-
-# We used
-sum(sapply(type_list, length))
-# Available
-z = data.table::fread("data/icgc_projects_and_ids.tsv")
-length(unique(z$project_code))
-# Available for cancers we used
-nrow(z[project_code %in% Reduce(c, type_list)])
-# 2897
-
 
